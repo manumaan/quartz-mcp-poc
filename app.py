@@ -1,87 +1,94 @@
-#from flask import Flask, render_template, request, jsonify
-from quart import Quart, render_template, request, jsonify, Response
-from typing import Union, Any
-import re
-
-import subprocess
-import requests
+from starlette.applications import Starlette
+from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.routing import Route
+from authlib.integrations.starlette_client import OAuth
+from starlette.templating import Jinja2Templates
+import logging
 import json
 import os
 from openai import OpenAI
-from google_auth_oauthlib.flow import InstalledAppFlow
+import re
+from typing import Union, Any
+import uvicorn
 import asyncio
 from agents import Agent, Runner, trace, gen_trace_id
 from agents.mcp import MCPServer, MCPServerStdio
+from markdown import markdown
 
-#app = Flask(__name__)
-app = Quart(__name__) 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('app')
 
-GOOGLE_CLIENT_ID = None
-GOOGLE_CLIENT_SECRET = None
-GOOGLE_ACCESS_TOKEN = None
-GOOGLE_REFRESH_TOKEN = None
-# Define the TOOLS list with tool names and descriptions
+# Initialize OAuth
+oauth = OAuth()
+google = None
+
+# Initialize templates
+templates = Jinja2Templates(directory="templates")
+
+async def init_oauth():
+    global google
+    with open('webcredentials.json', 'r') as f:
+        credentials = json.load(f)
+        client_id = credentials['web']['client_id']
+        client_secret = credentials['web']['client_secret']
+
+    google = oauth.register(
+        name='google',
+        client_id=client_id,
+        client_secret=client_secret,
+        server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+        client_kwargs={
+            'scope': 'openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.modify'
+        }
+    )
+
 TOOLS = [
     {"name": "send_email", "description": "Send an email using Gmail"},
     {"name": "get_recent_emails", "description": "Retrieve recent emails"},
     {"name": "refresh_token", "description": "Refresh Gmail API token"}
 ]
 
-@app.errorhandler(TypeError)
-async def handle_type_error(error: TypeError) -> Union[Response, tuple[Response, int]]:
-    """Handle TypeError exceptions globally."""
-    return {
-        "error": "Invalid response type",
-        "message": str(error)
-    }, 500
-
-@app.before_request
-def initialize():
-    pass
-
-@app.route('/')
-async def index():
-    return await render_template('index.html')
-
-#get gmail tokens 
-with open('credentials.json', 'r') as f:
-    credentials = json.load(f)
-    GOOGLE_CLIENT_ID = credentials['installed']['client_id']
-    GOOGLE_CLIENT_SECRET = credentials['installed']['client_secret']
-
-
-    # Use InstalledAppFlow to get the access_token and refresh_token
-    flow = InstalledAppFlow.from_client_config(
-        credentials,
-        scopes=["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"],
-        redirect_uri="http://localhost:5000",
-    )
-    
-    #creds = flow.run_local_server(port=0)
-   
-    # Add authorization prompt and more secure settings
-    creds = flow.run_local_server(
-        port=5000,
-        prompt='consent',  # Force consent prompt
-        authorization_prompt_message='Please authenticate with Google',
-        success_message='Authentication successful! You can close this window.',
-        open_browser=True
-    )
-
-    GOOGLE_ACCESS_TOKEN = creds.token
-    GOOGLE_REFRESH_TOKEN = creds.refresh_token
-
-#create openai client
-    openai_client = OpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY"),
+openai_client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY"),
 )
 
-#create mcp server 
+async def index(request):
+    # Check if the user is logged in by verifying the presence of 'google_token' in the session
+    if 'google_token' not in request.session or not request.session['google_token']:
+        # If not logged in, render the login CTA template
+        return templates.TemplateResponse("login_cta.html", {"request": request})
+
+    # If logged in, show the text box and buttons
+    user_info = request.session.get('user_info', {})
+    return templates.TemplateResponse("index.html", {"request": request, "show_textbox": True, "user_info": user_info})
+
+async def login(request):
+    redirect_uri = request.url_for('authorized')
+    return await google.authorize_redirect(request, redirect_uri)
+
+async def authorized(request):
+    token = await google.authorize_access_token(request)
+    if not token or 'id_token' not in token:
+        logger.error("Missing id_token in the token response")
+        return RedirectResponse(url='/')
+
+    request.session['google_token'] = token
+    try:
+        user_info = await google.parse_id_token(request, token)
+    except Exception as e:
+        logger.error(f"Error parsing id_token: {e}")
+        return RedirectResponse(url='/')
+
+    request.session['user_info'] = user_info
+
+    # Create MCP server
     tool_args = {
-        "google_access_token": GOOGLE_ACCESS_TOKEN,
-        "google_refresh_token": GOOGLE_REFRESH_TOKEN,
-        "google_client_id": GOOGLE_CLIENT_ID,
-        "google_client_secret": GOOGLE_CLIENT_SECRET,
+        "google_access_token": request.session['google_token']['access_token'],
+        "google_refresh_token": request.session['google_token'].get('refresh_token', ''),
+        "google_client_id": os.environ.get('GOOGLE_CLIENT_ID', ''),
+        "google_client_secret": os.environ.get('GOOGLE_CLIENT_SECRET', ''),
     }
 
     async def start_mcp_server():
@@ -96,17 +103,22 @@ with open('credentials.json', 'r') as f:
             with trace(workflow_name="gmail mcp server poc", trace_id=trace_id):
                 print(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}\n")
 
-
     asyncio.run(start_mcp_server())
+
+    return RedirectResponse(url='/')
+
+async def logout(request):
+    request.session.clear()
+    response = templates.TemplateResponse("logoff_confirmation.html", {"request": request})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 def parse_email_result(result_string: str) -> list[dict]:
     """Parse the formatted email string into a list of email dictionaries."""
-    # Split the string into individual email entries
     emails_raw = re.split(r'\d+\.\s+', result_string)[1:]  # Skip the header part
     emails = []
     
     for email_raw in emails_raw:
-        # Initialize an empty dictionary to store the fields
         email_fields = {
             'Subject': None,
             'From': None,
@@ -114,10 +126,8 @@ def parse_email_result(result_string: str) -> list[dict]:
             'Snippet': None
         }
         
-        # Split the email into lines
         lines = email_raw.split('\n')
         
-        # Process each line to find fields
         for line in lines:
             for field in email_fields.keys():
                 marker = f'**{field}:**'
@@ -125,7 +135,6 @@ def parse_email_result(result_string: str) -> list[dict]:
                     email_fields[field] = line.split(marker, 1)[1].strip()
                     break
         
-        # Map the fields to the expected output format
         email = {
             'subject': email_fields['Subject'] or 'No Subject',
             'sender': email_fields['From'] or 'Unknown Sender',
@@ -136,15 +145,32 @@ def parse_email_result(result_string: str) -> list[dict]:
     
     return emails
 
+async def run_with_mcp(tool_args, message):
+    async with MCPServerStdio(
+        name="gmail server",
+        params={
+            "command": "python",
+            "args": ["server.py", json.dumps(tool_args)],
+        },
+    ) as mcp_server:
+        agent = Agent(
+            name="Assistant",
+            instructions="Use the tools to help user with gmail",
+            mcp_servers=[mcp_server],
+        )
+        result = await Runner.run(starting_agent=agent, input=message)
+        return result.final_output
 
-@app.route('/process_prompt', methods=['POST'])
-async def process_prompt():
-    data = await request.form
-    user_prompt = data.get('prompt')
+async def process_prompt(request):
+    # Check if 'google_token' exists in the session
+    if 'google_token' not in request.session:
+        # Redirect to login with a GET request
+        return RedirectResponse(url='/login', status_code=303)
+
+    form = await request.form()
+    user_prompt = form.get('prompt')
     if not user_prompt:
-        return jsonify({"error": "No prompt provided"}), 400
-
-    print(user_prompt)
+        return JSONResponse({"error": "No prompt provided"}, status_code=400)
 
     tool_descriptions = "\n".join(
         [f"{tool['name']}: {tool['description']}" for tool in TOOLS]
@@ -168,80 +194,77 @@ async def process_prompt():
         ),
         input=f"Here are the available tools:\n{tool_descriptions}\n\nUser's query: \"{user_prompt}\"\n\nRespond with the name of the tool that best matches the query"
     )
-    print(response.output_text)
 
     output_parts = response.output_text.strip().split(':')
     tool_name = output_parts[0]
 
     if tool_name not in [tool['name'] for tool in TOOLS]:
-        return jsonify({"error": "No suitable tool found for the prompt."}), 400
+        return JSONResponse({"error": "No suitable tool found for the prompt."}, status_code=400)
 
-    async def run_with_mcp():
-        async with MCPServerStdio(
-            name="gmail server",
-            params={
-                "command": "python",
-                "args": ["server.py", json.dumps(tool_args)],
-            },
-        ) as mcp_server:
-            agent = Agent(
-                name="Assistant",
-                instructions="Use the tools to help user with gmail",
-                mcp_servers=[mcp_server],
-            )
-            result = await Runner.run(starting_agent=agent, input=message)
-            return result.final_output
-
+    print(tool_name)
+    print(output_parts)
+    
+    # Handle tool execution as before
     if tool_name == 'send_email':
         tool_args = {
-            "google_access_token": GOOGLE_ACCESS_TOKEN,
-            "google_refresh_token": GOOGLE_REFRESH_TOKEN,
-            "google_client_id": GOOGLE_CLIENT_ID,
-            "google_client_secret": GOOGLE_CLIENT_SECRET,
             "to": output_parts[1],
             "subject": output_parts[3],
             "body": output_parts[2],
-            "html_body": f"<p>{output_parts[2]}</p><br><br> This email has been sent by MCP Server."
+            "html_body": f"<p>{output_parts[2]}</p><br><br> This email has been sent by MCP Server.",
+            "google_access_token": request.session['google_token']['access_token']
         }
         message = f"Send the emails with these parameters: {json.dumps(tool_args)}"
     elif tool_name == 'get_recent_emails':
         tool_args = {
-            "google_access_token": GOOGLE_ACCESS_TOKEN,
-            "google_refresh_token": GOOGLE_REFRESH_TOKEN,
-            "google_client_id": GOOGLE_CLIENT_ID,
-            "google_client_secret": GOOGLE_CLIENT_SECRET,
             "max_results": 5,
-            "unread_only": False
+            "unread_only": False,
+            "google_access_token": request.session['google_token']['access_token']
         }
         message = f"Get the recent emails with these parameters: {json.dumps(tool_args)}"
 
     print(tool_args)
     print(f"Running with message: {json.dumps(message)}")
     
-    result = await run_with_mcp()
-    
+    # Simulate MCP server interaction
+    result = await run_with_mcp(tool_args, message)
+
     if tool_name == 'get_recent_emails':
-        print(result)
-        # Parse the result string into structured data
-        emails_data = parse_email_result(result)
-        return await render_template('emails.html', emails=emails_data)
+        # emails_data = parse_email_result(result)
+        # return JSONResponse({"emails": emails_data})
+        
+        # Convert the result from markdown to HTML
+        html_result = markdown(result)
+
+        # Render the emails using the emails.html template
+        return templates.TemplateResponse("emails.html", {"request": request, "emails": html_result})
     elif tool_name == 'send_email':
-        print(result)
-        # Parse the result to get email details
-        try:
-            result_dict = json.loads(result)
-            return await render_template('email_confirmation.html', response={
-                'to': tool_args['to'],
-                'subject': tool_args['subject']
-            })
-        except json.JSONDecodeError:
-            # If the result is not JSON, return a generic confirmation
-            return await render_template('email_confirmation.html', response={
-                'to': tool_args['to'],
-                'subject': tool_args['subject']
-            })
+        # Render the email confirmation using the email_confirmation.html template
+        return templates.TemplateResponse("email_confirmation.html", {"request": request, "response": {
+            'to': tool_args['to'],
+            'subject': tool_args['subject']
+        }})
     else:
-        return jsonify({"result": result})
+        # Handle cases where no specific tool logic is implemented
+        return JSONResponse({"result": result})
+
+routes = [
+    Route('/', endpoint=index),
+    Route('/login', endpoint=login),
+    Route('/login/authorized', endpoint=authorized),
+    Route('/logout', endpoint=logout),
+    Route('/process_prompt', endpoint=process_prompt, methods=['POST'])
+]
+
+app = Starlette(
+    routes=routes,
+    on_startup=[init_oauth]
+)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key='MCPTEST09812345789',
+    max_age=300
+)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    uvicorn.run(app, host='0.0.0.0', port=5000, log_level="info")
