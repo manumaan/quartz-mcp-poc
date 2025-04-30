@@ -1,74 +1,47 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Email Results</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recent Emails</title>
     <style>
         .email-container {
-            margin: 20px;
-            padding: 15px;
+            margin: 20px auto;
+            max-width: 800px;
+            font-family: Arial, sans-serif;
+        }
+        .email {
             border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        .email-header {
+            padding: 15px;
             margin-bottom: 10px;
+            border-radius: 5px;
+            background-color: #f9f9f9;
         }
-        .email-subject {
-            font-weight: bold;
-            font-size: 1.1em;
-            color: #333;
-        }
-        .email-body {
-            white-space: pre-wrap;
-        }
-        .email-metadata {
-            color: #666;
-            font-size: 0.9em;
-            margin: 5px 0;
-        }
-        .back-link {
-            display: inline-block;
-            margin-top: 20px;
+        .home-button {
+            display: block;
+            margin: 20px auto;
             padding: 10px 20px;
             background-color: #007bff;
             color: white;
             text-decoration: none;
             border-radius: 5px;
+            font-size: 1em;
+            text-align: center;
+            cursor: pointer;
         }
-        .back-link:hover {
+        .home-button:hover {
             background-color: #0056b3;
         }
     </style>
 </head>
 <body>
-    <h1>Email Results</h1>
-    {% if emails %}
-        {% for email in emails %}
-        <div class="email-container">
-            <div class="email-header">
-                {% if email is mapping %}
-                    <div class="email-subject">
-                        <strong>Subject:</strong>  {{ email.get('subject', 'No Subject') }}
-                    </div>
-                    <div class="email-metadata">
-                        <strong>From:</strong> {{ email.get('sender', 'Unknown Sender') }}
-                    </div>
-                    <div class="email-metadata">
-                        <strong>Date:</strong> {{ email.get('timestamp', 'Unknown Date') }}
-                    </div>
-                    <div class="email-body">
-                        {{ email.get('body', 'No content available') }}
-                    </div>
-                {% else %}
-                    <div class="email-body">
-                        {{ email }}
-                    </div>
-                {% endif %}
-            </div>
+    <div class="email-container">
+        <h1>Recent Emails</h1>
+        <div id="emails">
+            <!-- Emails will be dynamically inserted here -->
+            {{ emails|safe }}
         </div>
-        {% endfor %}
-    {% else %}
-        <p>No emails found.</p>
-    {% endif %}
-    <a href="/" class="back-link">Back to Home</a>
+        <a href="/" class="home-button">Return to Home</a>
+    </div>
 </body>
 </html>

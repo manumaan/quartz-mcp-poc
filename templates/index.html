@@ -3,15 +3,60 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gmail MCP Server POC</title>
+    <title>Welcome to MCP Server</title>
+    <style>
+        .form-container {
+            margin: 50px auto;
+            max-width: 600px;
+            text-align: center;
+        }
+        .text-box {
+            width: 100%;
+            padding: 10px;
+            font-size: 1em;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .submit-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            border: none;
+            font-size: 1em;
+            cursor: pointer;
+        }
+        .submit-button:hover {
+            background-color: #0056b3;
+        }
+        .logout-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: pink;
+            color: black;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 1em;
+            cursor: pointer;
+        }
+        .logout-button:hover {
+            background-color: #ff99cc;
+        }
+    </style>
 </head>
 <body>
-    <h1>MCP Server Tools</h1>
-
-    <form action="/process_prompt" method="post">
-        <label for="prompt">Enter your query:</label>
-        <input type="text" id="prompt" name="prompt" required>
-        <button type="submit">Submit</button>
-    </form>
+    <div class="form-container">
+        <h1>Welcome to MCP Server</h1>
+        <form action="/process_prompt" method="post">
+            <textarea class="text-box" name="prompt" placeholder="Enter your query"></textarea>
+            <button type="submit" class="submit-button">Submit</button>
+        </form>
+        <a href="/logout" class="logout-button">Logout</a>
+    </div>
 </body>
 </html>
